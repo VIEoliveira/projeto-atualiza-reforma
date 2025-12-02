@@ -9,6 +9,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import re
 
+# DEDUP: util de URL
+from urllib.parse import urlsplit, urlunsplit, parse_qsl
+
 WEBHOOK = "https://hook.us2.make.com/9v46zbanehc2m84vjk1scd4718xwhdmb"
 
 SITES = [
@@ -116,10 +119,33 @@ def extract_date_from_article_html(soup):
     scope = soup.find("article") or soup
     return parse_date_any(scope.get_text(" ", strip=True))
 
+# DEDUP: normalizador de URL (remove tracking/fragmento e padroniza)
+def _normalize_link(url: str | None) -> str | None:
+    if not url:
+        return None
+    u = urlsplit(url)
+    # remove utm_*, gclid, fbclid e o fragmento
+    qs_pairs = [
+        (k, v) for (k, v) in parse_qsl(u.query, keep_blank_values=True)
+        if not k.lower().startswith("utm_") and k.lower() not in ("gclid", "fbclid")
+    ]
+    query = "&".join(f"{k}={v}" for k, v in qs_pairs)
+    path = u.path.rstrip("/")  # remove barra final
+    return urlunsplit((u.scheme.lower(), u.netloc.lower(), path, query, ""))
+
+# DEDUP: normalizador simples de título (fallback quando não há link)
+def _normalize_title(t: str | None) -> str:
+    if not t:
+        return ""
+    return re.sub(r"\s+", " ", t).strip().lower()
+
 def coletar_noticias():
     print("Iniciando scraping...")
 
     todas = []
+
+    # DEDUP: conjunto global (por execução) de itens já vistos
+    vistos = set()
 
     # FIX: “hoje” no fuso correto
     hoje_iso = datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
@@ -159,9 +185,16 @@ def coletar_noticias():
 
                 # 3) incluir somente se a data for HOJE
                 if data_iso == hoje_iso:
+                    # DEDUP: gerar chave e pular duplicatas
+                    link_norm = _normalize_link(link)
+                    chave = link_norm or f"{site['fonte']}|{_normalize_title(titulo)}"
+                    if chave in vistos:
+                        continue
+                    vistos.add(chave)
+
                     todas.append({
                         "titulo": titulo,
-                        "link": link,
+                        "link": link_norm or link,  # envia o link já normalizado, se possível
                         "fonte": site["fonte"],
                         "data": data_iso
                     })
@@ -175,7 +208,7 @@ def coletar_noticias():
                 "data": None
             })
 
-    print("Total extraído (somente hoje):", len(todas))
+    print("Total extraído (somente hoje, sem duplicatas):", len(todas))
     return todas
 
 
@@ -218,4 +251,3 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._executar()
-
