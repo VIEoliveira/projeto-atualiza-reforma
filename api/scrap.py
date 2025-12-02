@@ -4,6 +4,10 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import json
 
+# ADDED:
+from datetime import datetime
+import re
+
 WEBHOOK = "https://hook.us2.make.com/9v46zbanehc2m84vjk1scd4718xwhdmb"
 
 SITES = [
@@ -28,11 +32,27 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
+# ADDED: meses pt-br p/ formato "d mmm aaaa"
+MESES_PT = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"]
 
 def coletar_noticias():
     print("Iniciando scraping...")
 
     todas = []
+
+    # ADDED: datas e regex de hoje (numérica e 'd mmm aaaa')
+    agora = datetime.now()
+    HOJE_NUM = agora.strftime("%d/%m/%Y")
+    HOJE_PT = f"{agora.day} {MESES_PT[agora.month-1]} {agora.year}".lower()
+    PAT_HOJE_NUM = re.compile(r"\b" + re.escape(HOJE_NUM) + r"\b")
+    PAT_HOJE_PT  = re.compile(r"\b" + re.escape(HOJE_PT) + r"\b", re.IGNORECASE)
+
+    # ADDED: regex genéricas para extrair data por item
+    PAT_ANY_NUM = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+    PAT_ANY_PT  = re.compile(
+        r"\b(\d{1,2}\s(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\s\d{4})\b",
+        re.IGNORECASE
+    )
 
     for site in SITES:
         try:
@@ -42,6 +62,12 @@ def coletar_noticias():
 
             soup = BeautifulSoup(r.text, "html.parser")
 
+            # ADDED: só segue se a página contiver a data de HOJE
+            page_text_lower = soup.get_text(" ", strip=True).lower()
+            if not (PAT_HOJE_NUM.search(page_text_lower) or PAT_HOJE_PT.search(page_text_lower)):
+                print(f"Sem notícia de hoje em {site['fonte']} — pulando site.")
+                continue
+
             for item in soup.select(site["selector"]):
                 titulo = item.get_text(strip=True)
                 link = item.get("href")
@@ -49,10 +75,18 @@ def coletar_noticias():
                 if link and link.startswith("/"):
                     link = urljoin(site["url"], link)
 
+                # ADDED: tenta achar a data do próprio bloco (lista), senão assume HOJE
+                bloco = item.parent or item
+                bloco_txt = bloco.get_text(" ", strip=True) if bloco else titulo
+                m = PAT_ANY_NUM.search(bloco_txt) or PAT_ANY_PT.search(bloco_txt)
+                data = m.group(1) if m else HOJE_NUM
+
                 todas.append({
                     "titulo": titulo,
                     "link": link,
-                    "fonte": site["fonte"]
+                    "fonte": site["fonte"],
+                    # ADDED:
+                    "data": data
                 })
 
         except Exception as e:
@@ -60,7 +94,9 @@ def coletar_noticias():
             todas.append({
                 "titulo": f"Erro ao processar {site['fonte']}",
                 "link": None,
-                "fonte": str(e)
+                "fonte": str(e),
+                # ADDED:
+                "data": None
             })
 
     print("Total extraído:", len(todas))
@@ -108,3 +144,4 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._executar()
+
