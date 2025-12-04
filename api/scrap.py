@@ -4,12 +4,13 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import json
 
-# FIX: datas/regex/util
+# Datas/regex/util
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import re
+import unicodedata
 
-# DEDUP: util de URL
+# URL utils p/ dedup
 from urllib.parse import urlsplit, urlunsplit, parse_qsl
 
 WEBHOOK = "https://hook.us2.make.com/9v46zbanehc2m84vjk1scd4718xwhdmb"
@@ -17,19 +18,19 @@ WEBHOOK = "https://hook.us2.make.com/9v46zbanehc2m84vjk1scd4718xwhdmb"
 SITES = [
     {
         "url": "https://noticias.iob.com.br/reforma-tributaria/",
-        "selector": ".td-module-title a",             # IOB mantém
+        "selector": ".td-module-title a",             # IOB
         "fonte": "IOB Reformas"
     },
     {
-        # SITE: LegisWeb — a listagem é uma TABELA (#busca_res)
+        # LegisWeb: resultados em tabela (#busca_res); título em .result-titulo a; data em .result-datado
         "url": "https://www.legisweb.com.br/noticias/?termo=Reforma+Tribut%E1ria&assunto=&acao=Buscar",
-        "selector": "#busca_res .result-titulo a",    # título certo
+        "selector": "#busca_res .result-titulo a",
         "fonte": "LegisWeb"
     },
     {
-        # SITE: Portal Reforma — Elementor: título em .elementor-post__title a
+        # Portal Reforma (Elementor): título em .elementor-post__title a; data em .elementor-post__date
         "url": "https://www.reformatributaria.com/ultimas-noticias/",
-        "selector": ".elementor-post__title a",       # título certo
+        "selector": ".elementor-post__title a",
         "fonte": "Portal Reforma"
     }
 ]
@@ -39,7 +40,8 @@ HEADERS = {
     "Accept-Language": "pt-BR,pt;q=0.9"
 }
 
-# FIX: mapas/regex para várias formas de data
+# --- PARSE DE DATAS ---
+
 MESES = {
     "jan": 1, "janeiro": 1,
     "fev": 2, "fevereiro": 2,
@@ -55,8 +57,8 @@ MESES = {
     "dez": 12, "dezembro": 12,
 }
 
-RE_NUM = re.compile(r"\b([0-3]?\d)[/\.]([01]?\d)[/\.](\d{4})\b")
-RE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+RE_NUM = re.compile(r"\b([0-3]?\d)[/\.]([01]?\d)[/\.](\d{4})\b")   # 02/12/2025, 2/12/2025, 02.12.2025
+RE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")                # 2025-12-02
 RE_MES = re.compile(
     r"\b([0-3]?\d)\s*(?:de\s+)?"
     r"(jan(?:eiro)?|fev(?:ereiro)?|mar(?:ço|co)?|abr(?:il)?|mai(?:o)?|jun(?:ho)?|"
@@ -88,8 +90,10 @@ def parse_date_any(text):
         return _to_date_iso(y, mo, d) if mo else None
     return None
 
+# --- EXTRAÇÃO DE DATA NA MATÉRIA ---
+
 def extract_date_from_article_html(soup, fonte=None):
-    # metas padrão
+    # Metas padrão
     for sel, attr, key in [
         ("meta", {"property": "article:published_time"}, "content"),
         ("meta", {"name": "date"}, "content"),
@@ -101,7 +105,7 @@ def extract_date_from_article_html(soup, fonte=None):
             if iso:
                 return iso
 
-    # <time>
+    # <time datetime/text>
     t = soup.find("time")
     if t and t.get("datetime"):
         iso = parse_date_any(t.get("datetime"))
@@ -112,7 +116,7 @@ def extract_date_from_article_html(soup, fonte=None):
         if iso:
             return iso
 
-    # SITE: seletores específicos por domínio (página da matéria)
+    # Específicos por site
     if fonte == "Portal Reforma":
         for sel in [".elementor-post-date", ".td-post-date", ".tdb-meta-date", ".entry-date"]:
             el = soup.select_one(sel)
@@ -129,10 +133,81 @@ def extract_date_from_article_html(soup, fonte=None):
                 if iso:
                     return iso
 
+    # Fallback: regex no topo
     scope = soup.find("article") or soup
     return parse_date_any(scope.get_text(" ", strip=True))
 
-# DEDUP: normalizador de URL
+# --- FILTRO: APENAS "REFORMA TRIBUTÁRIA" ---
+
+KEYWORDS = [
+    # núcleo
+    "reforma tributaria", "reforma tributária", "ibs", "cbs", "iva",
+    "imposto seletivo", "imposto sobre bens e serviços", "contribuicao sobre bens e servicos",
+    "contribuição sobre bens e serviços",
+    # regulamentação / leis
+    "lei complementar 214", "plp 68/2024", "regulamentação da reforma tributária",
+    "emenda constitucional 132",
+    # alíquotas e regimes
+    "alíquota de referência", "aliquota de referencia", "alíquotas-teste", "aliquotas-teste",
+    "estimativa de alíquotas", "regimes favorecidos", "regimes específicos",
+    "não-contribuintes", "nao-contribuintes", "isenção", "isencao",
+    "redução de 30%", "reducao de 30%", "redução de 60%", "reducao de 60%",
+    # governança
+    "conselho federativo do ibs", "comitê gestor do ibs", "comite gestor do ibs",
+    "administração do ibs e cbs", "arrecadação do ibs", "distribuição do ibs",
+    # transições e travas
+    "transição para o novo modelo", "transição do ibs e cbs", "transicao",
+    "teto da carga tributária", "teto da carga tributaria", "fixação das alíquotas de referência",
+    "fixacao das aliquotas de referencia",
+    # mecanismos sociais e setoriais
+    "cashback de impostos", "cesta básica nacional", "cesta basica nacional",
+    "zona franca de manaus", "simples nacional",
+    # fundos
+    "fundo de desenvolvimento regional", "fundo de compensação de benefícios fiscais",
+    "fundo de compensacao de beneficios fiscais",
+    # materiais oficiais
+    "resumo técnico", "resumo tecnico", "perguntas e respostas",
+    "apresentações reforma tributária", "apresentacoes reforma tributaria",
+    # siglas usadas em portais
+    "rt pro", "rtpro"
+]
+
+# negativas opcionais: só cortam quando NÃO houver uma positiva
+NEGATIVE = [
+    "malha fina", "irpf", "iptu", "itbi", "refis municipal", "spu"
+]
+
+def _norm(s: str | None) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+# pré-normaliza listas (performance e robustez)
+KEY_N = [_norm(k) for k in KEYWORDS]
+NEG_N = [_norm(n) for n in NEGATIVE]
+
+def match_reforma_title_url(titulo: str, link: str | None) -> bool:
+    t = _norm(titulo)
+    u = _norm(link or "")
+    pos = any(k in t or k in u for k in KEY_N)
+    if not pos:
+        return False
+    # se tem positiva, negativas não bloqueiam (alguns títulos têm "IRPJ/ICMS" explicando impactos)
+    return True
+
+def match_reforma_fulltext(texto: str) -> bool:
+    z = _norm(texto)
+    pos = any(k in z for k in KEY_N)
+    if not pos:
+        return False
+    # se quiser ser mais restritivo, descomente as duas linhas abaixo:
+    # if any(n in z for n in NEG_N) and not any(k in z for k in KEY_N):
+    #     return False
+    return True
+
+# --- DEDUP ---
+
 def _normalize_link(url: str | None) -> str | None:
     if not url:
         return None
@@ -150,28 +225,31 @@ def _normalize_title(t: str | None) -> str:
         return ""
     return re.sub(r"\s+", " ", t).strip().lower()
 
-# SITE: data na LISTAGEM, com regra específica por domínio
+# --- DATA NA LISTAGEM (por site) ---
+
 def _extract_list_date_iso(site_fonte: str, item, soup):
     try:
         if site_fonte == "Portal Reforma":
-            # sobe ao cartão do post e lê .elementor-post__date
+            # cartão do post → span.elementor-post__date
             card = item.find_parent(class_=re.compile(r"elementor-post", re.I)) or item.parent
             el = card.select_one(".elementor-post__date") if card else None
             if el:
                 return parse_date_any(el.get_text(" ", strip=True))
         elif site_fonte == "LegisWeb":
-            # pega a <tr> e lê .result-datado
+            # cada resultado numa <tr>; data em .result-datado
             tr = item.find_parent("tr") or item.parent
             el = tr.select_one(".result-datado") if tr else None
             if el:
                 return parse_date_any(el.get_text(" ", strip=True))
         else:
-            # IOB: tentar no parent mesmo
+            # IOB: parent costuma ter a meta com a data
             bloco = item.parent or item
             return parse_date_any(bloco.get_text(" ", strip=True))
     except Exception:
         return None
     return None
+
+# --- COLETOR ---
 
 def coletar_noticias():
     print("Iniciando scraping...")
@@ -193,10 +271,13 @@ def coletar_noticias():
                 if link and link.startswith("/"):
                     link = urljoin(site["url"], link)
 
-                # 1) data da LISTAGEM via seletor específico
+                # 1) data na LISTAGEM
                 data_iso = _extract_list_date_iso(site["fonte"], item, soup)
 
-                # 2) se não achar, abrir a matéria e procurar
+                # manter soup2 se abrirmos a matéria
+                soup2 = None
+
+                # 2) se não achou data, tenta na MATÉRIA
                 if not data_iso and link:
                     try:
                         r2 = requests.get(link, headers=HEADERS, timeout=15)
@@ -206,8 +287,25 @@ def coletar_noticias():
                     except Exception as e_in:
                         print(f"Falha ao abrir matéria ({site['fonte']}): {e_in}")
 
-                # 3) só hoje
+                # 3) somente hoje
                 if data_iso == hoje_iso:
+                    # 4) filtro de "Reforma Tributária"
+                    passa = match_reforma_title_url(titulo, link)
+                    if not passa:
+                        # título/URL ambíguo → confirma pelo corpo se já temos, senão abre agora
+                        if soup2 is None and link:
+                            try:
+                                r3 = requests.get(link, headers=HEADERS, timeout=15)
+                                r3.raise_for_status()
+                                soup2 = BeautifulSoup(r3.text, "html.parser")
+                            except Exception:
+                                soup2 = None
+                        if soup2 is not None:
+                            passa = match_reforma_fulltext(soup2.get_text(" ", strip=True))
+                    if not passa:
+                        continue  # não é reforma → descarta
+
+                    # 5) dedup
                     link_norm = _normalize_link(link)
                     chave = link_norm or f"{site['fonte']}|{_normalize_title(titulo)}"
                     if chave in vistos:
@@ -233,6 +331,7 @@ def coletar_noticias():
     print("Total extraído (somente hoje, sem duplicatas):", len(todas))
     return todas
 
+# --- HANDLER HTTP ---
 
 class handler(BaseHTTPRequestHandler):
     def _executar(self):
