@@ -172,7 +172,6 @@ KEYWORDS = [
     "rt pro", "rtpro"
 ]
 
-# negativas opcionais: só cortam quando NÃO houver uma positiva
 NEGATIVE = [
     "malha fina", "irpf", "iptu", "itbi", "refis municipal", "spu"
 ]
@@ -183,7 +182,6 @@ def _norm(s: str | None) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"\s+", " ", s).strip().lower()
 
-# pré-normaliza listas (performance e robustez)
 KEY_N = [_norm(k) for k in KEYWORDS]
 NEG_N = [_norm(n) for n in NEGATIVE]
 
@@ -193,7 +191,6 @@ def match_reforma_title_url(titulo: str, link: str | None) -> bool:
     pos = any(k in t or k in u for k in KEY_N)
     if not pos:
         return False
-    # se tem positiva, negativas não bloqueiam (alguns títulos têm "IRPJ/ICMS" explicando impactos)
     return True
 
 def match_reforma_fulltext(texto: str) -> bool:
@@ -201,9 +198,6 @@ def match_reforma_fulltext(texto: str) -> bool:
     pos = any(k in z for k in KEY_N)
     if not pos:
         return False
-    # se quiser ser mais restritivo, descomente as duas linhas abaixo:
-    # if any(n in z for n in NEG_N) and not any(k in z for k in KEY_N):
-    #     return False
     return True
 
 # --- DEDUP ---
@@ -266,7 +260,20 @@ def coletar_noticias():
             soup = BeautifulSoup(r.text, "html.parser")
 
             for item in soup.select(site["selector"]):
-                titulo = item.get_text(strip=True)
+                # ------------- TÍTULO (com limpeza específica LegisWeb) -------------
+                titulo = item.get_text(" ", strip=True)
+
+                if site["fonte"] == "LegisWeb":
+                    # 1) preferir atributo title (é mais limpo)
+                    if item.has_attr("title") and item["title"].strip():
+                        titulo = item["title"].strip()
+                    # 2) remover prefixos comuns da busca
+                    titulo = re.sub(r"^\s*reforma\s*tribut[aá]ria\s*[-–—:]\s*", "", titulo, flags=re.IGNORECASE)
+                    titulo = re.sub(r"^\s*reformatributaria\s*[-–—:]\s*", "", titulo, flags=re.IGNORECASE)
+                    # 3) normalizar espaços
+                    titulo = re.sub(r"\s{2,}", " ", titulo).strip()
+                # ---------------------------------------------------------------------
+
                 link = item.get("href")
                 if link and link.startswith("/"):
                     link = urljoin(site["url"], link)
