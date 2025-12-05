@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 import json
 
 # Datas/regex/util
-from datetime import datetime
+from datetime import datetime, timedelta  # ADIÇÃO: timedelta para calcular "últimos N dias"
 from zoneinfo import ZoneInfo
 import re
 import unicodedata
@@ -278,7 +278,10 @@ def coletar_noticias():
 
     todas = []
     vistos = set()  # ALTERAÇÃO: agora guarda id_unico, não mais uma chave solta
-    hoje_iso = datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
+
+    # ADIÇÃO: configuração de janela de dias (hoje + ontem = últimos 2 dias)
+    hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    limite = hoje - timedelta(days=1)  # inclui hoje e ontem; ajuste o "1" se quiser mais dias
 
     for site in SITES:
         try:
@@ -322,40 +325,50 @@ def coletar_noticias():
                     except Exception as e_in:
                         print(f"Falha ao abrir matéria ({site['fonte']}): {e_in}")
 
-                # 3) somente hoje
-                if data_iso == hoje_iso:
-                    # 4) filtro de "Reforma Tributária"
-                    passa = match_reforma_title_url(titulo, link)
-                    if not passa:
-                        # título/URL ambíguo → confirma pelo corpo se já temos, senão abre agora
-                        if soup2 is None and link:
-                            try:
-                                r3 = requests.get(link, headers=HEADERS, timeout=15)
-                                r3.raise_for_status()
-                                soup2 = BeautifulSoup(r3.text, "html.parser")
-                            except Exception:
-                                soup2 = None
-                        if soup2 is not None:
-                            passa = match_reforma_fulltext(soup2.get_text(" ", strip=True))
-                    if not passa:
-                        continue  # não é reforma → descarta
+                # 3) filtro por janela de datas (últimos 2 dias)
+                if not data_iso:
+                    continue  # sem data não conseguimos garantir recência
 
-                    # 5) dedup
-                    link_norm = _normalize_link(link)
-                    id_unico = gerar_id_unico(link_norm, titulo, site["fonte"])  # ADIÇÃO: id único usado no Python e no Make
-                    if id_unico in vistos:
-                        continue
-                    vistos.add(id_unico)
+                try:
+                    data_materia = datetime.fromisoformat(data_iso).date()
+                except ValueError:
+                    continue  # data inválida/inesperada → descarta
 
-                    todas.append({
-                        # ADIÇÃO: campos extras para alinhamento com o Data Store do Make
-                        "id_unico": id_unico,
-                        "link": link,  # ALTERAÇÃO: agora sempre mandamos o link original
-                        "link_normalizado": link_norm or link,
-                        "titulo": titulo,
-                        "fonte": site["fonte"],
-                        "data": data_iso
-                    })
+                if data_materia < limite:
+                    continue  # muito antiga → descarta
+
+                # 4) filtro de "Reforma Tributária"
+                passa = match_reforma_title_url(titulo, link)
+                if not passa:
+                    # título/URL ambíguo → confirma pelo corpo se já temos, senão abre agora
+                    if soup2 is None and link:
+                        try:
+                            r3 = requests.get(link, headers=HEADERS, timeout=15)
+                            r3.raise_for_status()
+                            soup2 = BeautifulSoup(r3.text, "html.parser")
+                        except Exception:
+                            soup2 = None
+                    if soup2 is not None:
+                        passa = match_reforma_fulltext(soup2.get_text(" ", strip=True))
+                if not passa:
+                    continue  # não é reforma → descarta
+
+                # 5) dedup
+                link_norm = _normalize_link(link)
+                id_unico = gerar_id_unico(link_norm, titulo, site["fonte"])  # ADIÇÃO: id único usado no Python e no Make
+                if id_unico in vistos:
+                    continue
+                vistos.add(id_unico)
+
+                todas.append({
+                    # ADIÇÃO: campos extras para alinhamento com o Data Store do Make
+                    "id_unico": id_unico,
+                    "link": link,  # ALTERAÇÃO: agora sempre mandamos o link original
+                    "link_normalizado": link_norm or link,
+                    "titulo": titulo,
+                    "fonte": site["fonte"],
+                    "data": data_iso
+                })
 
         except Exception as e:
             print(f"Erro ao processar {site['fonte']}: {e}")
@@ -369,7 +382,7 @@ def coletar_noticias():
             #     "data": None
             # })
 
-    print("Total extraído (somente hoje, sem duplicatas):", len(todas))
+    print("Total extraído (últimos 2 dias, sem duplicatas):", len(todas))  # ALTERAÇÃO: mensagem ajustada
     return todas
 
 # --- HANDLER HTTP ---
