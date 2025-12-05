@@ -12,6 +12,7 @@ import unicodedata
 
 # URL utils p/ dedup
 from urllib.parse import urlsplit, urlunsplit, parse_qsl
+import hashlib  # ADIÇÃO: para gerar id_unico estável a partir de link/título/fonte
 
 WEBHOOK = "https://hook.us2.make.com/9v46zbanehc2m84vjk1scd4718xwhdmb"
 
@@ -203,6 +204,14 @@ def match_reforma_fulltext(texto: str) -> bool:
 # --- DEDUP ---
 
 def _normalize_link(url: str | None) -> str | None:
+    """
+    ALTERAÇÃO: reforçamos a normalização de URL para bater melhor com o que será usado no Make:
+    - removemos parâmetros de tracking (utm_*, gclid, fbclid) [já existia]
+    - padronizamos scheme/http/https para 'https'
+    - removemos 'www.' do host
+    - removemos barra final da path
+    - descartamos fragmento (#...)
+    """
     if not url:
         return None
     u = urlsplit(url)
@@ -212,12 +221,31 @@ def _normalize_link(url: str | None) -> str | None:
     ]
     query = "&".join(f"{k}={v}" for k, v in qs_pairs)
     path = u.path.rstrip("/")
-    return urlunsplit((u.scheme.lower(), u.netloc.lower(), path, query, ""))
+    # padroniza scheme e host
+    scheme = "https" if u.scheme.lower() in ("http", "https") else u.scheme.lower()
+    netloc = u.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return urlunsplit((scheme, netloc, path, query, ""))  # fragment sempre vazio
 
 def _normalize_title(t: str | None) -> str:
     if not t:
         return ""
     return re.sub(r"\s+", " ", t).strip().lower()
+
+def gerar_id_unico(link_norm: str | None, titulo: str | None, fonte: str | None) -> str:
+    """
+    ADIÇÃO: gera um ID único estável para a notícia.
+    - usa link_normalizado (quando existir)
+    - + título normalizado
+    - + fonte normalizada
+    Esse mesmo id_unico pode ser usado como chave no Data Store do Make.
+    """
+    base_link = (link_norm or "").strip().lower()
+    titulo_norm = _normalize_title(titulo)
+    fonte_norm = (fonte or "").strip().lower()
+    chave_base = f"{base_link}||{titulo_norm}||{fonte_norm}"
+    return hashlib.md5(chave_base.encode("utf-8")).hexdigest()
 
 # --- DATA NA LISTAGEM (por site) ---
 
@@ -249,7 +277,7 @@ def coletar_noticias():
     print("Iniciando scraping...")
 
     todas = []
-    vistos = set()
+    vistos = set()  # ALTERAÇÃO: agora guarda id_unico, não mais uma chave solta
     hoje_iso = datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
 
     for site in SITES:
@@ -314,26 +342,32 @@ def coletar_noticias():
 
                     # 5) dedup
                     link_norm = _normalize_link(link)
-                    chave = link_norm or f"{site['fonte']}|{_normalize_title(titulo)}"
-                    if chave in vistos:
+                    id_unico = gerar_id_unico(link_norm, titulo, site["fonte"])  # ADIÇÃO: id único usado no Python e no Make
+                    if id_unico in vistos:
                         continue
-                    vistos.add(chave)
+                    vistos.add(id_unico)
 
                     todas.append({
+                        # ADIÇÃO: campos extras para alinhamento com o Data Store do Make
+                        "id_unico": id_unico,
+                        "link": link,  # ALTERAÇÃO: agora sempre mandamos o link original
+                        "link_normalizado": link_norm or link,
                         "titulo": titulo,
-                        "link": link_norm or link,
                         "fonte": site["fonte"],
                         "data": data_iso
                     })
 
         except Exception as e:
             print(f"Erro ao processar {site['fonte']}: {e}")
-            todas.append({
-                "titulo": f"Erro ao processar {site['fonte']}",
-                "link": None,
-                "fonte": str(e),
-                "data": None
-            })
+            # REMOÇÃO: antes adicionávamos uma "notícia de erro" em `todas` para cada fonte.
+            # Isso poluía o array enviado ao Make e atrapalhava deduplicação/banco.
+            # Se quiser logar esses erros em outro lugar, faça aqui sem incluir em `todas`.
+            # todas.append({
+            #     "titulo": f"Erro ao processar {site['fonte']}",
+            #     "link": None,
+            #     "fonte": str(e),
+            #     "data": None
+            # })
 
     print("Total extraído (somente hoje, sem duplicatas):", len(todas))
     return todas
