@@ -247,6 +247,65 @@ def gerar_id_unico(link_norm: str | None, titulo: str | None, fonte: str | None)
     chave_base = f"{base_link}||{titulo_norm}||{fonte_norm}"
     return hashlib.md5(chave_base.encode("utf-8")).hexdigest()
 
+# --- EXTRAÇÃO DO CORPO DA MATÉRIA ---
+
+def extract_article_body_text(soup: BeautifulSoup, fonte: str | None = None, max_chars: int = 8000) -> str:
+    """
+    ADIÇÃO: tenta extrair o texto principal da matéria.
+    Usa seletores específicos por site e, em seguida, fallbacks genéricos.
+    Limita o tamanho para não explodir o prompt.
+    """
+    candidatos = []
+
+    try:
+        if fonte == "Portal Reforma":
+            seletores = [
+                ".elementor-post__text",
+                ".elementor-widget-theme-post-content",
+                "article .entry-content",
+                "article"
+            ]
+        elif fonte == "LegisWeb":
+            seletores = [
+                ".noticia-conteudo",
+                ".noticia-corpo",
+                "article",
+                ".conteudo"
+            ]
+        elif fonte == "IOB Reformas":
+            seletores = [
+                ".td-post-content",
+                "article",
+                ".conteudo"
+            ]
+        else:
+            seletores = ["article", "main", "body"]
+
+        for sel in seletores:
+            el = soup.select_one(sel)
+            if el:
+                txt = el.get_text(" ", strip=True)
+                if txt and len(txt) > 200:  # evitar pegar blocos muito pequenos irrelevantes
+                    candidatos.append(txt)
+
+        if not candidatos:
+            # fallback: texto do <body>
+            body = soup.find("body")
+            if body:
+                txt = body.get_text(" ", strip=True)
+                if txt and len(txt) > 200:
+                    candidatos.append(txt)
+
+        if not candidatos:
+            return ""
+
+        texto = max(candidatos, key=len)  # pega o maior bloco de texto encontrado
+        if len(texto) > max_chars:
+            texto = texto[:max_chars] + " [...]"  # truncamento com indicação
+        return texto
+    except Exception:
+        return ""
+
 # --- DATA NA LISTAGEM (por site) ---
 
 def _extract_list_date_iso(site_fonte: str, item, soup):
@@ -353,7 +412,21 @@ def coletar_noticias():
                 if not passa:
                     continue  # não é reforma → descarta
 
-                # 5) dedup
+                # 5) garantir que temos HTML da matéria para extrair corpo
+                if soup2 is None and link:
+                    try:
+                        r4 = requests.get(link, headers=HEADERS, timeout=15)
+                        r4.raise_for_status()
+                        soup2 = BeautifulSoup(r4.text, "html.parser")
+                    except Exception as e_html:
+                        print(f"Falha ao obter HTML para corpo ({site['fonte']}): {e_html}")
+                        soup2 = None
+
+                corpo = ""
+                if soup2 is not None:
+                    corpo = extract_article_body_text(soup2, fonte=site["fonte"])  # ADIÇÃO: corpo da notícia
+
+                # 6) dedup
                 link_norm = _normalize_link(link)
                 id_unico = gerar_id_unico(link_norm, titulo, site["fonte"])  # ADIÇÃO: id único usado no Python e no Make
                 if id_unico in vistos:
@@ -367,7 +440,8 @@ def coletar_noticias():
                     "link_normalizado": link_norm or link,
                     "titulo": titulo,
                     "fonte": site["fonte"],
-                    "data": data_iso
+                    "data": data_iso,
+                    "corpo": corpo  # ADIÇÃO: texto (ou resumo bruto) da matéria
                 })
 
         except Exception as e:
