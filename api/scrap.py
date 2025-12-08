@@ -364,8 +364,9 @@ def coletar_noticias():
                     titulo = re.sub(r"\s{2,}", " ", titulo).strip()
                 # ---------------------------------------------------------------------
 
+                # AJUSTE: sempre normalizar URL (relativa ou absoluta)
                 link = item.get("href")
-                if link and link.startswith("/"):
+                if link:
                     link = urljoin(site["url"], link)
 
                 # 1) data na LISTAGEM
@@ -436,27 +437,19 @@ def coletar_noticias():
                 todas.append({
                     # ADIÇÃO: campos extras para alinhamento com o Data Store do Make
                     "id_unico": id_unico,
-                    "link": link,  # ALTERAÇÃO: agora sempre mandamos o link original
+                    "link": link,  # agora sempre mandamos link absoluto
                     "link_normalizado": link_norm or link,
                     "titulo": titulo,
                     "fonte": site["fonte"],
                     "data": data_iso,
-                    "corpo": corpo  # ADIÇÃO: texto (ou resumo bruto) da matéria
+                    "corpo": corpo  # texto (ou resumo bruto) da matéria
                 })
 
         except Exception as e:
             print(f"Erro ao processar {site['fonte']}: {e}")
-            # REMOÇÃO: antes adicionávamos uma "notícia de erro" em `todas` para cada fonte.
-            # Isso poluía o array enviado ao Make e atrapalhava deduplicação/banco.
-            # Se quiser logar esses erros em outro lugar, faça aqui sem incluir em `todas`.
-            # todas.append({
-            #     "titulo": f"Erro ao processar {site['fonte']}",
-            #     "link": None,
-            #     "fonte": str(e),
-            #     "data": None
-            # })
+            # Sem adicionar notícia de erro em `todas` para não poluir o array
 
-    print("Total extraído (últimos 2 dias, sem duplicatas):", len(todas))  # ALTERAÇÃO: mensagem ajustada
+    print("Total extraído (últimos 2 dias, sem duplicatas):", len(todas))
     return todas
 
 # --- HANDLER HTTP ---
@@ -500,4 +493,3 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._executar()
-
