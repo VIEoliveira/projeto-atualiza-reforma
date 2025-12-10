@@ -2,8 +2,8 @@ name: Executar Scraper Diário
 
 on:
   schedule:
-    - cron: "0 11 * * 1-6"   # Seg–Sáb às 08h da manhã (UTC → ajustar abaixo se necessário)
-  workflow_dispatch:        # permite rodar manualmente pelo botão "Run Workflow"
+    - cron: "40 10 * * 1-6"   # Rodar ~08h (Brasília), compensando atraso do GitHub
+  workflow_dispatch:
 
 jobs:
   run-scraper:
@@ -23,3 +23,4 @@ jobs:
 
       - name: Executar scraper
         run: python api/scrap.py
+
