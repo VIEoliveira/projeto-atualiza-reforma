@@ -22,8 +22,12 @@ from urllib3.util.retry import Retry
 # Defina no Vercel:
 # - N8N_WEBHOOK_URL = URL do Webhook (PRODUCTION) do n8n
 # - DAYS_WINDOW = 1 (hoje+ontem) ou 2 (hoje + 2 dias anteriores), etc.
+# - BODY_MAX_CHARS = limite de caracteres do corpo limpo (recomendado 3000~6000)
+# - BODY_MIN_CHARS = mínimo para aceitar corpo limpo antes de fallback (ex.: 400)
 WEBHOOK = os.getenv("N8N_WEBHOOK_URL", "").strip()
-DAYS_WINDOW = int(os.getenv("DAYS_WINDOW", "1"))  # 1 = hoje e ontem
+DAYS_WINDOW = int(os.getenv("DAYS_WINDOW", "1"))
+BODY_MAX_CHARS = int(os.getenv("BODY_MAX_CHARS", "5000"))
+BODY_MIN_CHARS = int(os.getenv("BODY_MIN_CHARS", "400"))
 
 SITES = [
     {"url": "https://noticias.iob.com.br/reforma-tributaria/", "selector": ".td-module-title a", "fonte": "IOB Reformas"},
@@ -257,12 +261,53 @@ def extract_doc_links(soup: BeautifulSoup, page_url: str) -> list[str]:
             out.append(u)
     return out[:12]
 
-# --- EXTRAÇÃO DO CORPO ---
-def extract_article_body_text(soup: BeautifulSoup, fonte: str | None = None, max_chars: int = 8000) -> str:
-    candidatos = []
+# =========================
+# EXTRAÇÃO DO CORPO (LIMPO)
+# =========================
+STOP_PHRASES = [
+    "fale conosco", "quem somos", "politica de privacidade", "política de privacidade",
+    "cookies", "assine", "newsletter", "atendimento", "central de atendimento",
+    "termos de uso", "trabalhe conosco",
+]
+
+def _drop_noise(soup: BeautifulSoup):
+    # Remove tags que quase nunca fazem parte do conteúdo editorial
+    for tag in soup.select("script, style, noscript, svg, canvas, iframe, form"):
+        tag.decompose()
+
+    # Remove áreas comuns de navegação e rodapé
+    for tag in soup.select("nav, header, footer, aside"):
+        tag.decompose()
+
+    # Remove elementos por classes/ids comuns
+    noisy_selectors = [
+        "[class*='menu']", "[class*='nav']", "[class*='navbar']",
+        "[class*='footer']", "[class*='header']", "[class*='sidebar']",
+        "[class*='cookie']", "[id*='cookie']",
+        "[class*='share']", "[class*='social']",
+        "[class*='breadcrumb']",
+        "[class*='comments']", "[id*='comments']",
+        "[class*='related']", "[class*='recommended']",
+        "[class*='newsletter']", "[class*='subscribe']",
+        "[class*='banner']", "[class*='advert']", "[class*='ads']",
+        "[class*='popup']", "[class*='modal']",
+    ]
+    for sel in noisy_selectors:
+        for el in soup.select(sel):
+            el.decompose()
+
+def extract_article_body_text(soup: BeautifulSoup, fonte: str | None = None, max_chars: int = 5000, min_chars: int = 400) -> str:
+    """
+    Extrai um corpo mais limpo:
+    - Escolhe um container provável por site
+    - Remove ruído
+    - Prioriza parágrafos <p> "bons"
+    - Para ao encontrar STOP_PHRASES (rodapé institucional)
+    - Fallback se ficar curto
+    """
     try:
         if fonte == "Portal Reforma":
-            seletores = [".elementor-post__text", ".elementor-widget-theme-post-content", "article .entry-content", "article"]
+            seletores = [".elementor-widget-theme-post-content", "article .entry-content", "article"]
         elif fonte == "LegisWeb":
             seletores = [".noticia-conteudo", ".noticia-corpo", "article", ".conteudo"]
         elif fonte == "IOB Reformas":
@@ -270,27 +315,62 @@ def extract_article_body_text(soup: BeautifulSoup, fonte: str | None = None, max
         else:
             seletores = ["article", "main", "body"]
 
+        container = None
         for sel in seletores:
             el = soup.select_one(sel)
             if el:
-                txt = el.get_text(" ", strip=True)
-                if txt and len(txt) > 200:
-                    candidatos.append(txt)
+                container = el
+                break
+        if container is None:
+            container = soup.body or soup
 
-        if not candidatos:
-            body = soup.find("body")
-            if body:
-                txt = body.get_text(" ", strip=True)
-                if txt and len(txt) > 200:
-                    candidatos.append(txt)
+        # cria um soup "isolado" para não quebrar o soup original
+        tmp = BeautifulSoup(str(container), "html.parser")
+        _drop_noise(tmp)
 
-        if not candidatos:
-            return ""
+        # 1) tenta por parágrafos
+        parts = []
+        for p in tmp.select("p"):
+            txt = p.get_text(" ", strip=True)
+            if not txt:
+                continue
+            if len(txt) < 40:  # corta legenda/menu
+                continue
 
-        texto = max(candidatos, key=len)
-        if len(texto) > max_chars:
-            texto = texto[:max_chars] + " [...]"
-        return texto
+            low = txt.lower()
+            if any(sp in low for sp in STOP_PHRASES):
+                break
+
+            parts.append(txt)
+
+        # remove duplicados mantendo ordem
+        if parts:
+            seen = set()
+            uniq = []
+            for t in parts:
+                if t in seen:
+                    continue
+                seen.add(t)
+                uniq.append(t)
+            text = " ".join(uniq)
+        else:
+            # 2) fallback: texto geral já "limpo"
+            text = tmp.get_text(" ", strip=True)
+
+        # 3) se ainda ficou curto, fallback mais amplo
+        if not text or len(text) < min_chars:
+            tmp2 = BeautifulSoup(str(soup.body or soup), "html.parser")
+            _drop_noise(tmp2)
+            text2 = tmp2.get_text(" ", strip=True)
+            if text2 and len(text2) > len(text):
+                text = text2
+
+        text = re.sub(r"\s{2,}", " ", (text or "")).strip()
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + " [...]"
+        return text
+
     except Exception:
         return ""
 
@@ -392,12 +472,18 @@ def coletar_noticias():
                 link_final = link
 
                 if soup2 is not None and link:
-                    # Canonical melhora dedupe e link “bonito”
                     canon = extract_canonical_url(soup2, base_url=link)
                     if canon:
                         link_final = canon
 
-                    corpo = extract_article_body_text(soup2, fonte=site["fonte"])
+                    # >>> CORPO LIMPO AQUI <<<
+                    corpo = extract_article_body_text(
+                        soup2,
+                        fonte=site["fonte"],
+                        max_chars=BODY_MAX_CHARS,
+                        min_chars=BODY_MIN_CHARS
+                    )
+
                     doc_candidatos = extract_doc_links(soup2, page_url=link_final or link)
 
                 link_norm = _normalize_link(link_final)
@@ -431,7 +517,6 @@ class handler(BaseHTTPRequestHandler):
 
             noticias = coletar_noticias()
 
-            # Envia para n8n (Webhook Trigger)
             try:
                 resp = SESSION.post(WEBHOOK, json={"noticias": noticias}, timeout=25)
                 print("Resposta do n8n:", resp.status_code, resp.text[:200])
